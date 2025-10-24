@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Head Empty — Admin Results</title>
+  <style>
+    body{font-family:Inter,system-ui,Arial;background:#f6f8fb;color:#111;margin:0;padding:22px}
+    .wrap{max-width:980px;margin:0 auto}
+    .card{background:#fff;padding:14px;border-radius:12px;box-shadow:0 6px 20px rgba(12,12,12,.06);margin-bottom:12px}
+    .row{display:flex;gap:12px;align-items:center}
+    .btn{background:#0ea5e9;color:#fff;padding:8px 12px;border:0;border-radius:8px;cursor:pointer}
+    .danger{background:#ef4444}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Admin — Voting Controls & Live Results</h1>
+
+    <div id="authCard" class="card">
+      <div id="authArea">
+        <p><strong>Sign in (admin)</strong></p>
+        <input id="email" placeholder="admin@example.com" />
+        <input id="password" placeholder="password" type="password" />
+        <div style="margin-top:8px">
+          <button id="signIn" class="btn">Sign In</button>
+          <button id="signOut" class="btn" style="display:none">Sign Out</button>
+        </div>
+        <p style="font-size:.9rem;color:#666">You must sign in with the admin account you configure in Firebase Auth.</p>
+      </div>
+    </div>
+
+    <div id="controls" class="card" style="display:none">
+      <p><strong>Episode Controls</strong></p>
+      <div class="row">
+        <label><input id="votingToggle" type="checkbox" /> Voting OPEN</label>
+        <button id="resetVotes" class="btn">Reset votes to zero</button>
+      </div>
+    </div>
+
+    <div id="resultsCard" class="card" style="display:none">
+      <p><strong>Live results</strong></p>
+      <canvas id="chart" width="800" height="300"></canvas>
+      <div id="top" style="margin-top:10px"></div>
+    </div>
+  </div>
+
+  <!-- Chart.js CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.3.0/dist/chart.umd.min.js"></script>
+
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/9.24.0/firebase-app.js";
+    import {
+      getFirestore, doc, getDoc, setDoc, updateDoc, onSnapshot, runTransaction
+    } from "https://www.gstatic.com/firebasejs/9.24.0/firebase-firestore.js";
+    import {
+      getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged
+    } from "https://www.gstatic.com/firebasejs/9.24.0/firebase-auth.js";
+
+    // === EDIT to match your contestants / episode ID (same as vote.html) ===
+    const CONTESTANTS = [
+      { id: 'cacti', name: 'Cacti', image: 'https://i.imgur.com/EXAMPLE1.jpg' },
+      { id: 'lobo', name: 'Lobo', image: 'https://i.imgur.com/EXAMPLE2.jpg' },
+      { id: 'mono', name: 'Mono', image: 'https://i.imgur.com/EXAMPLE3.jpg' },
+      { id: 'effy', name: 'Effy', image: 'https://i.imgur.com/EXAMPLE4.jpg' }
+    ];
+    const EPISODE_DOC = 'episode-01';
+
+    // TODO: paste your Firebase config object here (same as vote.html)
+    const firebaseConfig = {
+      // --- YOUR FIREBASE CONFIG HERE ---
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const db = getFirestore(app);
+    const auth = getAuth(app);
+    const episodeRef = doc(db, 'episodes', EPISODE_DOC);
+
+    // DOM
+    const emailInput = document.getElementById('email');
+    const passInput = document.getElementById('password');
+    const signInBtn = document.getElementById('signIn');
+    const signOutBtn = document.getElementById('signOut');
+    const controls = document.getElementById('controls');
+    const votingToggle = document.getElementById('votingToggle');
+    const resetBtn = document.getElementById('resetVotes');
+    const resultsCard = document.getElementById('resultsCard');
+    const topDiv = document.getElementById('top');
+
+    // Chart setup
+    const ctx = document.getElementById('chart').getContext('2d');
+    const labels = CONTESTANTS.map(c=>c.name);
+    const initialData = CONTESTANTS.map(()=>0);
+
+    const chart = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [{
+          label: 'Votes',
+          data: initialData
+        }]
+      },
+      options: {
+        responsive: true,
+        animation: { duration: 200 }
+      }
+    });
+
+    // Auth handlers
+    signInBtn.onclick = async () => {
+      const email = emailInput.value.trim();
+      const pw = passInput.value;
+      try {
+        await signInWithEmailAndPassword(auth, email, pw);
+      } catch (e) {
+        alert('Sign in failed: ' + e.message);
+      }
+    };
+
+    signOutBtn.onclick = async () => {
+      await signOut(auth);
+    };
+
+    onAuthStateChanged(auth, (user) => {
+      if (user) {
+        // show admin UI
+        controls.style.display = 'block';
+        resultsCard.style.display = 'block';
+        signInBtn.style.display = 'none';
+        signOutBtn.style.display = 'inline-block';
+        // load episode doc and listen live
+        initEpisodeListener();
+      } else {
+        controls.style.display = 'none';
+        resultsCard.style.display = 'none';
+        signInBtn.style.display = 'inline-block';
+        signOutBtn.style.display = 'none';
+      }
+    });
+
+    // Ensure episode doc exists
+    async function ensureEpisodeDoc() {
+      const snap = await getDoc(episodeRef);
+      if (!snap.exists()) {
+        const votes = {};
+        CONTESTANTS.forEach(c => votes[c.id] = 0);
+        await setDoc(episodeRef, { votes, votingOpen: true, createdAt: new Date() });
+      }
+    }
+
+    // Listen to episode doc in real time
+    let unsub = null;
+    async function initEpisodeListener() {
+      await ensureEpisodeDoc();
+      if (unsub) unsub();
+      unsub = onSnapshot(episodeRef, (snap) => {
+        const data = snap.exists() ? snap.data() : null;
+        if (!data) return;
+        const votes = data.votes || {};
+        votingToggle.checked = !!data.votingOpen;
+        // update chart
+        const values = CONTESTANTS.map(c => votes[c.id] || 0);
+        chart.data.datasets[0].data = values;
+        chart.update();
+        // top voted
+        const sorted = CONTESTANTS.map(c => ({ id:c.id, name:c.name, v: votes[c.id]||0 }))
+          .sort((a,b)=>b.v - a.v);
+        topDiv.innerHTML = `<strong>Top:</strong> ${sorted[0].name} (${sorted[0].v} votes) — Total votes: ${values.reduce((s,x)=>s+x,0)}`;
+      });
+    }
+
+    // Toggle voting open/closed (admin action)
+    votingToggle.addEventListener('change', async (e) => {
+      const newVal = votingToggle.checked;
+      try {
+        await updateDoc(episodeRef, { votingOpen: newVal });
+      } catch (err) {
+        alert('Could not update voting state: ' + err.message);
+        // revert UI
+        votingToggle.checked = !newVal;
+      }
+    });
+
+    // Reset votes button
+    resetBtn.addEventListener('click', async () => {
+      if (!confirm('Reset all vote counts to zero?')) return;
+      const zeroed = {};
+      CONTESTANTS.forEach(c => zeroed[c.id] = 0);
+      try {
+        await updateDoc(episodeRef, { votes: zeroed });
+      } catch (err) {
+        alert('Reset failed: ' + err.message);
+      }
+    });
+
+    // init
+    await ensureEpisodeDoc();
+  </script>
+</body>
+</html>
