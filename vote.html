@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Head Empty — Vote</title>
+  <style>
+    :root{--card-bg:#fff;--bg:#f2f5f8;--accent:#3b82f6}
+    body{font-family:Inter,system-ui,Arial;margin:0;background:var(--bg);color:#111}
+    .wrap{max-width:980px;margin:28px auto;padding:20px}
+    header{display:flex;align-items:center;justify-content:space-between}
+    h1{margin:0;font-size:1.6rem}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}
+    .card{background:var(--card-bg);padding:14px;border-radius:12px;box-shadow:0 6px 20px rgba(10,10,10,.06)}
+    .contestant{display:flex;gap:12px;align-items:center}
+    .contestant img{width:72px;height:72px;object-fit:cover;border-radius:10px}
+    .name{font-weight:600}
+    .controls{display:flex;gap:8px;flex-direction:column}
+    .submit{background:var(--accent);color:white;padding:10px;border-radius:8px;border:0;cursor:pointer;font-weight:600}
+    .submit[disabled]{opacity:.6;cursor:not-allowed}
+    small{color:#666}
+    .status{margin-top:12px}
+    @media(max-width:720px){.grid{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Vote — Head Empty (Elimination)</h1>
+      <div>
+        <small id="votingState">Checking voting state…</small>
+      </div>
+    </header>
+
+    <script>
+      // Replace these with your contestants / image urls
+      const CONTESTANTS = [
+        { id: 'cacti', name: 'Cacti', image: 'https://i.imgur.com/EXAMPLE1.jpg' },
+        { id: 'lobo', name: 'Lobo', image: 'https://i.imgur.com/EXAMPLE2.jpg' },
+        { id: 'mono', name: 'Mono', image: 'https://i.imgur.com/EXAMPLE3.jpg' },
+        { id: 'effy', name: 'Effy', image: 'https://i.imgur.com/EXAMPLE4.jpg' }
+      ];
+
+      // Episode ID (change per episode, e.g., "episode-01")
+      const EPISODE_DOC = 'episode-01';
+    </script>
+
+    <div style="margin-top:14px" id="voteArea">
+      <div class="card">
+        <p><strong>Elimination Slot A</strong> — pick exactly one contestant</p>
+        <div id="slotA" class="grid"></div>
+      </div>
+
+      <div style="height:12px"></div>
+
+      <div class="card">
+        <p><strong>Elimination Slot B</strong> — pick exactly one contestant (can't pick same as Slot A)</p>
+        <div id="slotB" class="grid"></div>
+
+        <div style="margin-top:12px;display:flex;gap:10px;align-items:center">
+          <button id="submitBtn" class="submit" disabled>Submit Vote</button>
+          <small id="feedback"></small>
+        </div>
+
+        <div class="status" id="status"></div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/9.24.0/firebase-app.js";
+    import {
+      getFirestore, doc, getDoc, setDoc, runTransaction, onSnapshot
+    } from "https://www.gstatic.com/firebasejs/9.24.0/firebase-firestore.js";
+
+    // TODO: paste your Firebase config object here (from Firebase console)
+    const firebaseConfig = {
+      // apiKey: "...",
+      // authDomain: "...",
+      // projectId: "..."
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const db = getFirestore(app);
+
+    // DOM refs
+    const slotA = document.getElementById('slotA');
+    const slotB = document.getElementById('slotB');
+    const submitBtn = document.getElementById('submitBtn');
+    const feedback = document.getElementById('feedback');
+    const votingStateEl = document.getElementById('votingState');
+    const status = document.getElementById('status');
+
+    // --- One-vote-per-device setup ---
+    const VOTE_KEY = `voted-${EPISODE_DOC}`; // unique per episode
+
+    function checkIfVoted() {
+      if (localStorage.getItem(VOTE_KEY) === 'true') {
+        votingStateEl.textContent = 'You already voted in this episode.';
+        submitBtn.disabled = true;
+        document.querySelectorAll('input[type="radio"]').forEach(i => i.disabled = true);
+        return true;
+      }
+      return false;
+    }
+
+    // Render contestants into both slots
+    function renderSlot(container, slotName) {
+      container.innerHTML = '';
+      CONTESTANTS.forEach(c => {
+        const el = document.createElement('label');
+        el.className = 'contestant card';
+        el.style.alignItems = 'center';
+        el.innerHTML = `
+          <img src="${c.image}" alt="${c.name}" />
+          <div style="flex:1">
+            <div class="name">${c.name}</div>
+            <small>${c.id}</small>
+          </div>
+          <div class="controls">
+            <input type="radio" name="${slotName}" value="${c.id}" />
+          </div>
+        `;
+        container.appendChild(el);
+      });
+    }
+
+    renderSlot(slotA, 'slotA');
+    renderSlot(slotB, 'slotB');
+
+    // UI logic: don't allow same pick for both slots
+    function getSelections() {
+      const a = document.querySelector('input[name="slotA"]:checked')?.value || null;
+      const b = document.querySelector('input[name="slotB"]:checked')?.value || null;
+      return { a, b };
+    }
+
+    function updateSubmitState() {
+      const { a, b } = getSelections();
+      if (a && b && a !== b) {
+        submitBtn.disabled = false;
+        feedback.textContent = '';
+      } else {
+        submitBtn.disabled = true;
+        if (!a || !b) feedback.textContent = 'Pick one for each slot.';
+        else feedback.textContent = 'You cannot pick the same contestant for both slots.';
+      }
+    }
+
+    document.addEventListener('change', updateSubmitState);
+
+    // Firestore setup
+    const episodeRef = doc(db, 'episodes', EPISODE_DOC);
+    let votingOpen = false;
+
+    async function ensureEpisodeDoc() {
+      const snap = await getDoc(episodeRef);
+      if (!snap.exists()) {
+        const votes = {};
+        CONTESTANTS.forEach(c => votes[c.id] = 0);
+        await setDoc(episodeRef, { votes, votingOpen: true, createdAt: new Date() });
+      }
+    }
+
+    onSnapshot(episodeRef, (snap) => {
+      const data = snap.exists() ? snap.data() : null;
+      if (!data) {
+        votingStateEl.textContent = 'No episode data (admin needs to create it).';
+        votingOpen = false;
+      } else {
+        votingOpen = !!data.votingOpen;
+        if (localStorage.getItem(VOTE_KEY) === 'true') {
+          votingStateEl.textContent = 'You already voted in this episode.';
+          submitBtn.disabled = true;
+        } else {
+          votingStateEl.textContent = votingOpen ? 'Voting is OPEN' : 'Voting is CLOSED';
+          if (!votingOpen) {
+            submitBtn.disabled = true;
+            status.textContent = 'Voting is closed.';
+          } else {
+            updateSubmitState();
+            status.textContent = '';
+          }
+        }
+      }
+    });
+
+    // Voting function
+    async function submitVote(a, b) {
+      submitBtn.disabled = true;
+      status.textContent = 'Submitting...';
+      try {
+        await runTransaction(db, async (tx) => {
+          const snap = await tx.get(episodeRef);
+          if (!snap.exists()) throw new Error('Episode missing.');
+          const data = snap.data();
+          if (!data.votingOpen) throw new Error('Voting is closed.');
+
+          const votes = { ...(data.votes || {}) };
+          votes[a] = (votes[a] || 0) + 1;
+          votes[b] = (votes[b] || 0) + 1;
+          tx.update(episodeRef, { votes });
+        });
+        status.textContent = 'Vote submitted — thanks!';
+        localStorage.setItem(VOTE_KEY, 'true'); // mark as voted
+        checkIfVoted();
+        document.querySelectorAll('input[name="slotA"], input[name="slotB"]').forEach(i=>i.checked=false);
+      } catch (err) {
+        status.textContent = 'Error: ' + err.message;
+      } finally {
+        setTimeout(()=>{ status.textContent = ''; }, 3000);
+      }
+    }
+
+    submitBtn.addEventListener('click', async () => {
+      const { a, b } = getSelections();
+      if (!a || !b || a === b) return;
+      await submitVote(a, b);
+    });
+
+    // initialize
+    await ensureEpisodeDoc();
+    checkIfVoted();
+  </script>
+</body>
+</html>
